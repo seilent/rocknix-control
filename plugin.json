@@ -1,0 +1,11 @@
+{
+  "name": "ROCKNIX Control",
+  "version": "0.1.0",
+  "author": "seilent",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["hardware", "performance", "power"],
+    "description": "CPU/GPU frequency and fan speed control for ROCKNIX"
+  }
+}
