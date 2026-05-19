@@ -13,7 +13,6 @@ DEFAULT_FAN_CURVE = {"speeds": [51, 51, 153], "temps": [40000, 60000, 80000]}
 
 
 def _discover_cpu_policies():
-    """Discover available CPU frequency scaling policies."""
     policies = []
     cpufreq_dir = "/sys/devices/system/cpu/cpufreq"
     if os.path.isdir(cpufreq_dir):
@@ -28,11 +27,9 @@ def _discover_cpu_policies():
 
 
 def _discover_gpu_devfreq():
-    """Discover GPU devfreq path."""
     for entry in glob.glob("/sys/class/devfreq/*gpu*"):
         if os.path.exists(os.path.join(entry, "available_frequencies")):
             return entry
-    # Fallback: check all devfreq entries for GPU-like ones
     for entry in glob.glob("/sys/class/devfreq/*"):
         if "gpu" in os.path.basename(entry).lower():
             return entry
@@ -78,7 +75,6 @@ async def _awrite(path, value):
     return await asyncio.to_thread(_write, path, value)
 
 
-# --- Caches ---
 _presets_cache = None
 _game_profiles_cache = None
 
@@ -88,7 +84,6 @@ def _presets_path():
 
 
 def _build_default_preset():
-    """Build default preset dynamically from discovered policies and GPU."""
     preset = {}
     for policy in CPU_POLICIES:
         base = CPU_BASE.format(policy)
@@ -162,7 +157,6 @@ def _save_game_profiles(data):
 
 
 def _parse_fan_conf():
-    """Parse fancontrol.conf bash arrays into Python lists (ascending order for frontend)."""
     if not os.path.exists(FAN_CONF):
         return None
     content = _read(FAN_CONF)
@@ -179,7 +173,6 @@ def _parse_fan_conf():
             vals = line.replace("TEMPS=(", "").rstrip(")")
             temps = [int(x) for x in vals.split()]
     if speeds and temps:
-        # Strip floor entry (temp=0) and return ascending
         pairs = [(t, s) for t, s in zip(temps, speeds) if t > 0]
         pairs.sort()
         return {"speeds": [s for t, s in pairs], "temps": [t for t, s in pairs]}
@@ -187,9 +180,7 @@ def _parse_fan_conf():
 
 
 def _write_fan_conf(speeds, temps):
-    """Write fancontrol.conf with SPEEDS and TEMPS in descending order (required by fancontrol script)."""
     os.makedirs(os.path.dirname(FAN_CONF), exist_ok=True)
-    # Pair, sort descending by temp, append floor entry
     pairs = sorted(zip(temps, speeds), reverse=True)
     desc_temps = [t for t, s in pairs] + [0]
     desc_speeds = [s for t, s in pairs] + [0]
@@ -199,7 +190,6 @@ def _write_fan_conf(speeds, temps):
 
 
 def _read_max_temp():
-    """Read GPU/CPU subsystem thermal zones and return the maximum temperature in millidegrees."""
     max_temp = 0
     for zone in glob.glob("/sys/class/thermal/thermal_zone*/type"):
         zone_type = _read(zone)
@@ -215,7 +205,6 @@ def _read_max_temp():
 
 
 def _interpolate_pwm(temp, curve):
-    """Linearly interpolate PWM from curve points. temp in millidegrees."""
     temps = curve["temps"]
     speeds = curve["speeds"]
     if temp <= temps[0]:
@@ -224,7 +213,6 @@ def _interpolate_pwm(temp, curve):
         return speeds[-1]
     for i in range(1, len(temps)):
         if temp <= temps[i]:
-            # Linear interpolation between points i-1 and i
             t0, t1 = temps[i - 1], temps[i]
             s0, s1 = speeds[i - 1], speeds[i]
             if t1 == t0:
@@ -238,7 +226,6 @@ SYSTEM_CFG = "/storage/.config/system/configs/system.cfg"
 
 
 def _get_system_setting(key, default=""):
-    """Read a key=value from system.cfg."""
     if not os.path.exists(SYSTEM_CFG):
         return default
     try:
@@ -252,7 +239,6 @@ def _get_system_setting(key, default=""):
 
 
 def _set_system_setting(key, value):
-    """Write a key=value to system.cfg, replacing existing or appending."""
     lines = []
     found = False
     if os.path.exists(SYSTEM_CFG):
@@ -269,7 +255,6 @@ def _set_system_setting(key, value):
             f.write(f"{key}={value}\n")
 
 
-# --- Async wrappers for helper functions ---
 
 async def _aload_presets():
     return await asyncio.to_thread(_load_presets)
@@ -307,11 +292,10 @@ class Plugin:
     fan_hwmon = None
     _fan_curve = None
     _curve_task = None
+    _apply_lock = None
 
-    # --- Fan Curve Control Loop ---
 
     async def _fan_curve_loop(self):
-        """Background task: polls temperature every 2s and sets PWM from active curve."""
         decky.logger.info("Fan curve loop started")
         last_pwm = -1
         try:
@@ -332,13 +316,11 @@ class Plugin:
             decky.logger.info("Fan curve loop cancelled")
 
     def _start_curve_loop(self):
-        """Start the fan curve control loop if not already running."""
         if self._curve_task is None or self._curve_task.done():
             self._curve_task = asyncio.get_event_loop().create_task(self._fan_curve_loop())
             decky.logger.info("Fan curve loop task created")
 
     def _stop_curve_loop(self):
-        """Stop the fan curve control loop and restore fan to auto."""
         if self._curve_task and not self._curve_task.done():
             self._curve_task.cancel()
             decky.logger.info("Fan curve loop task stopped")
@@ -347,7 +329,6 @@ class Plugin:
         if self.fan_hwmon:
             _write(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
 
-    # --- CPU Control ---
 
     async def get_cpu_info(self):
         result = {}
@@ -371,7 +352,6 @@ class Plugin:
     async def set_cpu_governor(self, policy: int, governor: str):
         return await _awrite(os.path.join(CPU_BASE.format(policy), "scaling_governor"), governor)
 
-    # --- GPU Control ---
 
     async def get_gpu_info(self):
         if not GPU_BASE:
@@ -402,10 +382,8 @@ class Plugin:
             return False
         return await _awrite(os.path.join(GPU_BASE, "governor"), governor)
 
-    # --- Temperature ---
 
     async def get_temps(self):
-        """Return max CPU and GPU temperatures in millidegrees."""
         cpu_temp = 0
         gpu_temp = 0
         for zone in glob.glob("/sys/class/thermal/thermal_zone*/type"):
@@ -426,7 +404,6 @@ class Plugin:
                 gpu_temp = max(gpu_temp, t)
         return {"cpu": cpu_temp, "gpu": gpu_temp}
 
-    # --- Fan Control ---
 
     async def get_fan_info(self):
         if not self.fan_hwmon:
@@ -450,55 +427,43 @@ class Plugin:
             return False
         return await _awrite(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
 
-    # --- Fan Curve ---
 
     async def get_fan_curve(self):
-        """Get current fan curve. Returns {speeds: [...], temps: [...], profile: str}."""
         profile = await _aget_system_setting("cooling.profile", "moderate")
         if profile == "custom":
             curve = _parse_fan_conf()
             if curve:
                 return {**curve, "profile": "custom"}
-        # Return default 3-point curve
         return {"speeds": DEFAULT_FAN_CURVE["speeds"][:], "temps": DEFAULT_FAN_CURVE["temps"][:], "profile": profile}
 
     async def set_fan_curve(self, speeds: str, temps: str):
-        """Write custom fan curve. speeds/temps are JSON arrays."""
         speeds_list = json.loads(speeds)
         temps_list = json.loads(temps)
         if len(speeds_list) != len(temps_list):
             return False
-        # Validate speeds are non-decreasing
         for i in range(1, len(speeds_list)):
             if speeds_list[i] < speeds_list[i - 1]:
                 return False
-        # Validate temps are strictly ascending
         for i in range(1, len(temps_list)):
             if temps_list[i] <= temps_list[i - 1]:
                 return False
-        # Write conf for persistence across reboots
         await _awrite_fan_conf(speeds_list, temps_list)
         await _aset_system_setting("cooling.profile", "custom")
-        # Store curve and start internal loop
         self._fan_curve = {"speeds": speeds_list, "temps": temps_list}
         self._start_curve_loop()
         return True
 
     async def set_fan_profile(self, profile: str):
-        """Switch to a fan profile."""
         await _aset_system_setting("cooling.profile", profile)
         if profile == "custom":
-            # Load curve from conf and start loop
             curve = _parse_fan_conf()
             if curve:
                 self._fan_curve = curve
                 self._start_curve_loop()
         else:
-            # Stop loop and set fan to auto
             self._stop_curve_loop()
         return True
 
-    # --- Default Preset ---
 
     async def get_default_preset(self):
         preset = {}
@@ -516,7 +481,6 @@ class Plugin:
         }
         return preset
 
-    # --- Preset System ---
 
     async def get_presets(self):
         data = await _aload_presets()
@@ -551,39 +515,40 @@ class Plugin:
         return False
 
     async def apply_preset(self, name: str):
-        decky.logger.info(f"apply_preset called with: {name}")
-        data = await _aload_presets()
-        preset = data["presets"].get(name)
-        if not preset:
-            decky.logger.info(f"apply_preset: preset '{name}' not found. Available: {list(data['presets'].keys())}")
-            return False
-        for policy in CPU_POLICIES:
-            max_key = f"cpu_policy{policy}_max"
-            min_key = f"cpu_policy{policy}_min"
-            if max_key in preset:
-                await self.set_cpu_max_freq(policy, preset[max_key])
-            if min_key in preset:
-                await self.set_cpu_min_freq(policy, preset[min_key])
-        if "gpu_max" in preset:
-            await self.set_gpu_max_freq(preset["gpu_max"])
-        if "gpu_min" in preset:
-            await self.set_gpu_min_freq(preset["gpu_min"])
-        # Fan handling
-        if "fan_mode" in preset:
-            if preset["fan_mode"] == "auto":
-                self._stop_curve_loop()
-                await self.set_fan_auto()
-            elif preset["fan_mode"] == "manual" and preset.get("fan_pwm") is not None:
-                self._stop_curve_loop()
-                await self.set_fan_speed(preset["fan_pwm"])
-        if "fan_curve" in preset:
-            curve = preset["fan_curve"]
-            self._fan_curve = {"speeds": curve["speeds"], "temps": curve["temps"]}
-            # Write conf for persistence
-            await _awrite_fan_conf(curve["speeds"], curve["temps"])
-            await _aset_system_setting("cooling.profile", "custom")
-            self._start_curve_loop()
-        return True
+        if not self._apply_lock:
+            self._apply_lock = asyncio.Lock()
+        async with self._apply_lock:
+            decky.logger.info(f"apply_preset called with: {name}")
+            data = await _aload_presets()
+            preset = data["presets"].get(name)
+            if not preset:
+                decky.logger.info(f"apply_preset: preset '{name}' not found. Available: {list(data['presets'].keys())}")
+                return False
+            for policy in CPU_POLICIES:
+                max_key = f"cpu_policy{policy}_max"
+                min_key = f"cpu_policy{policy}_min"
+                if max_key in preset:
+                    await self.set_cpu_max_freq(policy, preset[max_key])
+                if min_key in preset:
+                    await self.set_cpu_min_freq(policy, preset[min_key])
+            if "gpu_max" in preset:
+                await self.set_gpu_max_freq(preset["gpu_max"])
+            if "gpu_min" in preset:
+                await self.set_gpu_min_freq(preset["gpu_min"])
+            if "fan_mode" in preset:
+                if preset["fan_mode"] == "auto":
+                    self._stop_curve_loop()
+                    await self.set_fan_auto()
+                elif preset["fan_mode"] == "manual" and preset.get("fan_pwm") is not None:
+                    self._stop_curve_loop()
+                    await self.set_fan_speed(preset["fan_pwm"])
+            if "fan_curve" in preset:
+                curve = preset["fan_curve"]
+                self._fan_curve = {"speeds": curve["speeds"], "temps": curve["temps"]}
+                await _awrite_fan_conf(curve["speeds"], curve["temps"])
+                await _aset_system_setting("cooling.profile", "custom")
+                self._start_curve_loop()
+            return True
 
     async def get_current_settings(self):
         settings = {}
@@ -606,7 +571,6 @@ class Plugin:
         settings["fan_curve"] = curve if curve else DEFAULT_FAN_CURVE
         return settings
 
-    # --- Per-Game Profiles ---
 
     async def get_game_profile(self, game_id: str):
         data = await _aload_game_profiles()
@@ -630,17 +594,14 @@ class Plugin:
     async def get_all_game_profiles(self):
         return await _aload_game_profiles()
 
-    # --- Lifecycle ---
 
     async def _main(self):
         self.fan_hwmon = _find_fan_hwmon()
         decky.logger.info(f"ROCKNIX Control loaded. Fan hwmon: {self.fan_hwmon}")
         decky.logger.info(f"Discovered CPU policies: {CPU_POLICIES}")
         decky.logger.info(f"Discovered GPU devfreq: {GPU_BASE}")
-        # Stop fancontrol service — we handle fan control internally
         subprocess.run(["systemctl", "stop", "fancontrol"], capture_output=True, timeout=10)
         decky.logger.info("fancontrol service stopped")
-        # If custom profile is active, start the curve loop
         profile = await _aget_system_setting("cooling.profile", "moderate")
         if profile == "custom":
             curve = _parse_fan_conf()
@@ -649,10 +610,8 @@ class Plugin:
                 self._start_curve_loop()
 
     async def _unload(self):
-        # Cancel curve loop task
         self._stop_curve_loop()
         if self.fan_hwmon:
             await _awrite(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
-        # Restore OS fancontrol service
         subprocess.run(["systemctl", "start", "fancontrol"], capture_output=True, timeout=10)
         decky.logger.info("ROCKNIX Control unloaded.")

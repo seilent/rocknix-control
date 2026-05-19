@@ -3,10 +3,9 @@ import {
   PanelSection, PanelSectionRow, SliderField,
   DropdownItem, ButtonItem, TextField
 } from "@decky/ui";
-import { useState, useEffect, FC } from "react";
+import { useState, useEffect, useRef, FC } from "react";
 import { FaCog, FaPlus, FaPen, FaTrash } from "react-icons/fa";
 
-// ─── Globals (provided by Decky/Steam environment) ───────────────────────────
 
 declare const SteamClient: {
   GameSessions: {
@@ -18,7 +17,6 @@ declare const appStore: {
   GetAppOverviewByAppID: (appId: number) => { display_name: string } | null;
 };
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 interface CpuPolicyInfo {
   available_frequencies: number[];
@@ -45,7 +43,6 @@ interface Preset {
 
 interface CurvePoint { temp: number; speed: number; }
 
-// ─── Backend callables ───────────────────────────────────────────────────────
 
 const getCpuInfo = callable<[], CpuInfo>("get_cpu_info");
 const getGpuInfo = callable<[], GpuInfo>("get_gpu_info");
@@ -65,7 +62,6 @@ const setFanProfile = callable<[profile: string], boolean>("set_fan_profile");
 const getGameProfile = callable<[gameId: string], string | null>("get_game_profile");
 const setGameProfile = callable<[gameId: string, presetName: string], boolean>("set_game_profile");
 
-// ─── Module-level state (survives panel remounts) ────────────────────────────
 
 const state = {
   runningAppId: 0,
@@ -75,12 +71,10 @@ const state = {
 
 let switching = false;
 
-// ─── Constants ───────────────────────────────────────────────────────────────
 
 function getPolicyLabels(cpuInfo: CpuInfo): { [key: string]: string } {
   const policies = Object.keys(cpuInfo).sort((a, b) => Number(a) - Number(b));
   if (policies.length === 1) return { [policies[0]]: "CPU" };
-  // Label by max frequency: lowest = Little, highest = Big, middle = Mid
   const sorted = [...policies].sort((a, b) => {
     const maxA = cpuInfo[a]?.available_frequencies?.slice(-1)[0] ?? 0;
     const maxB = cpuInfo[b]?.available_frequencies?.slice(-1)[0] ?? 0;
@@ -105,7 +99,6 @@ const DEFAULT_FAN_CURVE: CurvePoint[] = [
   { temp: 80000, speed: 153 },
 ];
 
-// ─── Fan Curve Editor ────────────────────────────────────────────────────────
 
 const FanCurveEditor: FC<{
   points: CurvePoint[];
@@ -194,7 +187,6 @@ function enforceMonotonic(points: CurvePoint[]): CurvePoint[] {
   return result;
 }
 
-// ─── Main Content ────────────────────────────────────────────────────────────
 
 function Content() {
   const [cpuInfo, setCpuInfo] = useState<CpuInfo | null>(null);
@@ -215,20 +207,17 @@ function Content() {
   const [runningAppId, setRunningAppId] = useState<number>(state.runningAppId);
   const [gameName, setGameName] = useState<string>(state.runningGameName);
 
-  // ─── Data loading ──────────────────────────────────────────────────────────
 
   const refreshHardware = async () => {
     const [cpu, gpu, preset] = await Promise.all([getCpuInfo(), getGpuInfo(), getPreset(selectedPreset)]);
     setCpuInfo(cpu);
     setGpuInfo(gpu);
-    // Live hardware values for display
     const liveMax: { [key: string]: number } = {};
     for (const policy of Object.keys(cpu)) {
       liveMax[policy] = cpu[policy]?.max_freq ?? 0;
     }
     setLiveCpuMax(liveMax);
     setLiveGpuMax(gpu.max_freq);
-    // Slider values from preset (fall back to live if preset doesn't have them)
     const presetMax: { [key: string]: number } = {};
     for (const policy of Object.keys(cpu)) {
       presetMax[policy] = (preset as any)?.[`cpu_policy${policy}_max`] ?? liveMax[policy];
@@ -258,12 +247,16 @@ function Content() {
     refreshHardware();
     refreshPresets();
     refreshFanCurve();
-    // Sync module-level state into React state every second
     const interval = setInterval(() => {
       setRunningAppId(state.runningAppId);
       setGameName(state.runningGameName);
       getTemps().then(setTemps);
-      // If lifecycle hook changed the active preset, sync dropdown
+      getCpuInfo().then((cpu) => {
+        const liveMax: { [key: string]: number } = {};
+        for (const p of Object.keys(cpu)) liveMax[p] = cpu[p]?.max_freq ?? 0;
+        setLiveCpuMax(liveMax);
+      });
+      getGpuInfo().then((gpu) => setLiveGpuMax(gpu.max_freq));
       if (state.activePreset !== selectedPreset && !switching) {
         setSelectedPreset(state.activePreset);
         refreshHardware();
@@ -273,20 +266,28 @@ function Content() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-save on unmount if in edit mode
+  const saveRef = useRef({ editMode, cpuMaxFreqs, gpuMaxFreq, editName, selectedPreset });
+  saveRef.current = { editMode, cpuMaxFreqs, gpuMaxFreq, editName, selectedPreset };
+
   useEffect(() => {
     return () => {
+      const { editMode, cpuMaxFreqs, gpuMaxFreq, editName, selectedPreset } = saveRef.current;
       if (editMode) {
         getCurrentSettings().then((current) => {
-          savePreset(selectedPreset, JSON.stringify(current));
+          for (const policy of Object.keys(cpuMaxFreqs)) {
+            (current as any)[`cpu_policy${policy}_max`] = cpuMaxFreqs[policy];
+          }
+          current.gpu_max = gpuMaxFreq;
+          const name = editName.trim() || selectedPreset;
+          savePreset(name, JSON.stringify(current)).then(() => applyPreset(name));
         });
       }
     };
-  });
+  }, []);
 
-  // ─── Preset handlers ──────────────────────────────────────────────────────
 
   const handleSelectPreset = async (name: string) => {
+    if (name === selectedPreset) return;
     switching = true;
     try {
       setSelectedPreset(name);
@@ -325,9 +326,19 @@ function Content() {
     }
     const current = await getCurrentSettings();
     const name = trimmed || selectedPreset;
+    for (const policy of Object.keys(cpuMaxFreqs)) {
+      (current as any)[`cpu_policy${policy}_max`] = cpuMaxFreqs[policy];
+    }
+    current.gpu_max = gpuMaxFreq;
     await savePreset(name, JSON.stringify(current));
     await applyPreset(name);
     setEditMode(false);
+  };
+
+  const handleCancel = () => {
+    setEditMode(false);
+    refreshHardware();
+    refreshFanCurve();
   };
 
   const handleDeletePreset = async () => {
@@ -339,14 +350,12 @@ function Content() {
     await refreshPresets();
   };
 
-  // ─── Hardware handlers ─────────────────────────────────────────────────────
 
   const handleCpuMaxChange = async (policy: string, index: number) => {
     const freqs = cpuInfo?.[policy]?.available_frequencies;
     if (!freqs) return;
     const freq = freqs[index];
     setCpuMaxFreqs((prev) => ({ ...prev, [policy]: freq }));
-    await setCpuMaxFreq(Number(policy), freq);
   };
 
   const handleGpuMaxChange = async (index: number) => {
@@ -354,19 +363,16 @@ function Content() {
     if (!freqs) return;
     const freq = freqs[index];
     setGpuMaxFreqState(freq);
-    await setGpuMaxFreq(freq);
   };
 
   const handleCurveChange = async (points: CurvePoint[]) => {
     setCurvePoints(points);
     const sorted = [...points].sort((a, b) => a.temp - b.temp);
     await saveFanCurve(JSON.stringify(sorted.map(p => p.speed)), JSON.stringify(sorted.map(p => p.temp)));
-    // Save to current preset
     const current = await getCurrentSettings();
     await savePreset(selectedPreset, JSON.stringify(current));
   };
 
-  // ─── Render ───────────────────────────────────────────────────────────────
 
   if (!cpuInfo || !gpuInfo) {
     return (
@@ -410,6 +416,9 @@ function Content() {
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem layout="below" onClick={handleExitEditMode}>Save</ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={handleCancel}>Cancel</ButtonItem>
             </PanelSectionRow>
             {selectedPreset !== "Default" && (
               <PanelSectionRow>
