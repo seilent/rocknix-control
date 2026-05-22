@@ -320,14 +320,14 @@ class Plugin:
             self._curve_task = asyncio.get_event_loop().create_task(self._fan_curve_loop())
             decky.logger.info("Fan curve loop task created")
 
-    def _stop_curve_loop(self):
+    async def _stop_curve_loop(self):
         if self._curve_task and not self._curve_task.done():
             self._curve_task.cancel()
             decky.logger.info("Fan curve loop task stopped")
         self._curve_task = None
         self._fan_curve = None
         if self.fan_hwmon:
-            _write(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
+            await _awrite(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
 
 
     async def get_cpu_info(self):
@@ -461,7 +461,7 @@ class Plugin:
                 self._fan_curve = curve
                 self._start_curve_loop()
         else:
-            self._stop_curve_loop()
+            await self._stop_curve_loop()
         return True
 
 
@@ -537,10 +537,10 @@ class Plugin:
                 await self.set_gpu_min_freq(preset["gpu_min"])
             if "fan_mode" in preset:
                 if preset["fan_mode"] == "auto":
-                    self._stop_curve_loop()
+                    await self._stop_curve_loop()
                     await self.set_fan_auto()
                 elif preset["fan_mode"] == "manual" and preset.get("fan_pwm") is not None:
-                    self._stop_curve_loop()
+                    await self._stop_curve_loop()
                     await self.set_fan_speed(preset["fan_pwm"])
             if "fan_curve" in preset:
                 curve = preset["fan_curve"]
@@ -610,7 +610,7 @@ class Plugin:
                 self._start_curve_loop()
 
     async def _unload(self):
-        self._stop_curve_loop()
+        await self._stop_curve_loop()
         if self.fan_hwmon:
             await _awrite(os.path.join(self.fan_hwmon, "pwm1_enable"), 2)
         subprocess.run(["systemctl", "start", "fancontrol"], capture_output=True, timeout=10)

@@ -248,15 +248,22 @@ function Content() {
     refreshPresets();
     refreshFanCurve();
     const interval = setInterval(() => {
-      setRunningAppId(state.runningAppId);
-      setGameName(state.runningGameName);
-      getTemps().then(setTemps);
+      if (switching) return;  // skip entire tick during profile switch to avoid RPC queue buildup
+      if (state.runningAppId !== runningAppIdRef.current) setRunningAppId(state.runningAppId);
+      if (state.runningGameName !== gameNameRef.current) setGameName(state.runningGameName);
+      getTemps().then((t) => {
+        setTemps((prev) => (prev.cpu === t.cpu && prev.gpu === t.gpu) ? prev : t);
+      });
       getCpuInfo().then((cpu) => {
         const liveMax: { [key: string]: number } = {};
         for (const p of Object.keys(cpu)) liveMax[p] = cpu[p]?.max_freq ?? 0;
-        setLiveCpuMax(liveMax);
+        setLiveCpuMax((prev) => {
+          const keys = Object.keys(liveMax);
+          if (keys.length === Object.keys(prev).length && keys.every((k) => prev[k] === liveMax[k])) return prev;
+          return liveMax;
+        });
       });
-      getGpuInfo().then((gpu) => setLiveGpuMax(gpu.max_freq));
+      getGpuInfo().then((gpu) => setLiveGpuMax((prev) => (prev === gpu.max_freq ? prev : gpu.max_freq)));
       if (state.activePreset !== selectedPresetRef.current && !switching) {
         setSelectedPreset(state.activePreset);
       }
@@ -269,6 +276,12 @@ function Content() {
 
   const selectedPresetRef = useRef(selectedPreset);
   selectedPresetRef.current = selectedPreset;
+
+  const runningAppIdRef = useRef(runningAppId);
+  runningAppIdRef.current = runningAppId;
+
+  const gameNameRef = useRef(gameName);
+  gameNameRef.current = gameName;
 
   useEffect(() => {
     return () => {
